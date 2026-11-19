@@ -1,0 +1,42 @@
+name: Unzip and Build APK
+on:
+  push:
+    paths: ['*.zip']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unzip project
+        run: |
+          set -e
+          Z=$(ls *.zip | head -n1)
+          mkdir /tmp/x
+          unzip -q "$Z" -d /tmp/x
+          find /tmp/x -type d -name '{*' -prune -exec rm -rf {} +
+          S=$(dirname "$(find /tmp/x -name settings.gradle.kts | head -n1)")
+          rm -rf "$S/.github"
+          cp -a "$S"/. .
+          rm "$Z"
+      - name: Commit source
+        run: |
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add -A
+          git commit -m "Add project" || true
+          git push
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PeaceWalkerLauncher
+          path: app/build/outputs/apk/debug/app-debug.apk
