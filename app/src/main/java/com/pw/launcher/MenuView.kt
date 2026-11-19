@@ -1,12 +1,13 @@
 package com.pw.launcher
 
-import android.animation.ValueAnimator
 import android.graphics.*
+import android.os.SystemClock
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.sin
 
@@ -22,6 +23,7 @@ class MenuView(private val act: MainActivity) : View(act) {
     private val opts = BitmapFactory.Options().apply { inScaled = false }
     private val bgTitle = BitmapFactory.decodeResource(resources, R.drawable.bg_title, opts)
     private val bgMenu = BitmapFactory.decodeResource(resources, R.drawable.bg_menu, opts)
+    private val ring = BitmapFactory.decodeResource(resources, R.drawable.ring, opts)
 
     private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
     private val tp = TextPaint(Paint.ANTI_ALIAS_FLAG)
@@ -31,7 +33,26 @@ class MenuView(private val act: MainActivity) : View(act) {
     private val stack = ArrayList<Pair<S, Int>>()
     private var infoTitle = ""
     private var infoBody = ""
-    private var fade = 1f
+    // animation clock
+    private var started = false
+    private var enterStart = 0L
+    private var lastT = 0L
+    private var nowMs = 0L
+    private var raw = 1f   // linear 0..1 progress of the current screen's enter animation
+    private var en = 1f    // eased version of raw
+    private var selY = 0f
+    private var snap = true
+    private val scan = Paint().apply {
+        val b = Bitmap.createBitmap(1, 4, Bitmap.Config.ARGB_8888)
+        b.setPixel(0, 0, 0x30000000)
+        for (y in 1..3) b.setPixel(0, y, 0)
+        shader = BitmapShader(b, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+    }
+
+    init {
+        setWillNotDraw(false)
+        isFocusable = true
+    }
 
     private val langs = listOf("English", "French", "Italian", "German", "Spanish", "Portuguese (Brazil)")
     private val rowNames = listOf("Resolution Settings", "Internal Resolution", "Internal Upscaling", "Cutscenes", "Restore Defaults")
@@ -53,12 +74,18 @@ class MenuView(private val act: MainActivity) : View(act) {
 
     // ---------- state helpers ----------
     private fun anim() {
-        ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 220
-            addUpdateListener { fade = it.animatedValue as Float; invalidate() }
-            start()
-        }
+        enterStart = SystemClock.uptimeMillis(); snap = true
     }
+
+    private fun ease(x: Float) = 1f - (1f - x) * (1f - x) * (1f - x)
+
+    private fun fa(col: Int, k: Float): Int =
+        (col and 0x00FFFFFF) or ((Color.alpha(col) * k.coerceIn(0f, 1f)).toInt() shl 24)
+
+    private fun mix(a: Int, b: Int, k: Float): Int = Color.rgb(
+        (Color.red(a) + (Color.red(b) - Color.red(a)) * k).toInt(),
+        (Color.green(a) + (Color.green(b) - Color.green(a)) * k).toInt(),
+        (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * k).toInt())
 
     private fun go(next: S) {
         stack.add(s to sel); s = next; sel = 0; anim(); invalidate()
@@ -202,38 +229,73 @@ class MenuView(private val act: MainActivity) : View(act) {
         p.style = Paint.Style.FILL; p.color = color; c.drawPath(path, p)
     }
 
-    private fun footer(c: Canvas) {
-        txt(c, "D-pad  Move cursor      A  Confirm      B  Back", W - 50f, 1048f, 22f, Color.WHITE, false, Paint.Align.RIGHT)
+    private fun footer(c: Canvas, k: Float = en) {
+        txt(c, "D-pad  Move cursor      A  Confirm      B  Back", W - 50f, 1048f, 22f, fa(Color.WHITE, k), false, Paint.Align.RIGHT)
     }
 
     private fun darkBase(c: Canvas) {
-        c.drawBitmap(bgMenu, null, RectF(0f, 0f, 1194f, H), p)
-        rect(c, 1186f, 0f, W, H, 0xF2090909.toInt())
-        txt(c, "1974", 1208f, 150f, 100f, Color.WHITE, true)
-        txt(c, "Peace Walker Incident", 1214f, 190f, 24f, 0xFFBBBBBB.toInt())
-        txt(c, "!", 1880f, 112f, 76f, YEL, true, Paint.Align.CENTER)
+        val po = (1f - en) * 160f
+        // art: slow drift + slide in
+        c.save()
+        c.clipRect(0f, 0f, 1194f, H)
+        val drift = sin(nowMs / 5000.0).toFloat() * 14f
+        c.translate(597f + drift - (1f - en) * 40f, 540f)
+        c.scale(1.1f, 1.1f)
+        p.alpha = (255 * min(1f, en * 1.5f)).toInt()
+        c.drawBitmap(bgMenu, null, RectF(-597f, -540f, 597f, 540f), p)
+        p.alpha = 255
+        c.restore()
+        // panel
+        rect(c, 1186f + po, 0f, W + 200f, H, 0xF2090909.toInt())
+        // slowly rotating ring behind the list
+        c.save()
+        c.translate(1700f + po, 700f)
+        c.rotate(nowMs / 1000f * 6f)
+        p.alpha = 30
+        c.drawBitmap(ring, null, RectF(-500f, -500f, 500f, 500f), p)
+        p.alpha = 255
+        c.restore()
+        txt(c, "1974", 1208f + po, 150f, 100f, fa(Color.WHITE, en), true)
+        txt(c, "Peace Walker Incident", 1214f + po, 190f, 24f, fa(0xFFBBBBBB.toInt(), en))
+        val blink = 0.65f + 0.35f * sin(nowMs / 400.0).toFloat()
+        txt(c, "!", 1880f + po, 112f, 76f, fa(YEL, en * blink), true, Paint.Align.CENTER)
         footer(c)
     }
 
+    private fun kItem(i: Int) = ease((raw * 1.6f - i * 0.12f).coerceIn(0f, 1f))
+
     private fun drawList(c: Canvas, list: List<String>, label: String?) {
+        val po = (1f - en) * 160f
         if (label != null) {
-            txt(c, label, 1190f, 484f, 22f, Color.WHITE)
-            rect(c, 1186f, 494f, 1914f, 496f, 0x88FFFFFF.toInt())
+            txt(c, label, 1190f + po, 484f, 22f, fa(Color.WHITE, en))
+            rect(c, 1186f + po, 494f, 1914f + po, 496f, fa(0x88FFFFFF.toInt(), en))
         }
-        list.forEachIndexed { i, t ->
+        // idle item boxes
+        list.forEachIndexed { i, _ ->
+            val k = kItem(i)
             val top = 522f + i * 69.5f
-            val r = RectF(1186f, top, 1914f, top + 58f)
-            if (i == sel) {
-                p.style = Paint.Style.FILL; p.color = YEL; c.drawRect(r, p)
-                txt(c, t, 1208f, top + 39f, 30f, Color.BLACK, true)
-            } else {
-                p.style = Paint.Style.FILL; p.color = 0x99000000.toInt(); c.drawRect(r, p)
-                p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = 0x88FFFFFF.toInt(); c.drawRect(r, p)
-                txt(c, t, 1208f, top + 38f, 28f, Color.WHITE)
-            }
+            val r = RectF(1186f + (1f - k) * 90f, top, 1914f + (1f - k) * 90f, top + 58f)
+            p.style = Paint.Style.FILL; p.color = fa(0x99000000.toInt(), k); c.drawRect(r, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = fa(0x88FFFFFF.toInt(), k); c.drawRect(r, p)
+        }
+        // animated selection bar
+        if (list.isNotEmpty()) {
+            val k = kItem(sel.coerceIn(0, list.size - 1))
+            val xo = (1f - k) * 90f
+            val pulse = 0.5f + 0.5f * sin(nowMs / 260.0).toFloat()
+            rect(c, 1186f + xo, selY, 1914f + xo, selY + 58f, fa(mix(YEL, 0xFFFFE680.toInt(), pulse * 0.55f), k))
+            rect(c, 1186f + xo, selY, 1194f + xo, selY + 58f, fa(Color.WHITE, k))
+        }
+        // labels
+        list.forEachIndexed { i, t ->
+            val k = kItem(i)
+            val top = 522f + i * 69.5f
+            val xo = (1f - k) * 90f
+            if (i == sel) txt(c, t, 1208f + xo + 8f, top + 39f, 30f, fa(Color.BLACK, k), true)
+            else txt(c, t, 1208f + xo, top + 38f, 28f, fa(Color.WHITE, k))
             if (s == S.LANG && i == act.prefs.getInt("lang", 0)) {
-                p.style = Paint.Style.FILL; p.color = if (i == sel) Color.BLACK else YEL
-                c.drawCircle(1880f, top + 29f, 8f, p)
+                p.style = Paint.Style.FILL; p.color = fa(if (i == sel) Color.BLACK else YEL, k)
+                c.drawCircle(1880f + xo, top + 29f, 8f, p)
             }
         }
     }
@@ -241,15 +303,65 @@ class MenuView(private val act: MainActivity) : View(act) {
     private fun grayBase(c: Canvas, title: String, hint: String) {
         rect(c, 0f, 0f, W, H, 0xFF111111.toInt())
         rect(c, 0f, 58f, W, 100f, Color.WHITE)
-        txt(c, title, 100f, 89f, 26f, Color.BLACK, true)
+        txt(c, title, 100f - (1f - en) * 60f, 89f, 26f, fa(Color.BLACK, en), true)
         rect(c, 0f, 104f, W, 1004f, 0xFFD9D9D9.toInt())
         rect(c, 0f, 104f, W, 107f, 0xFF666666.toInt())
         rect(c, 0f, 1004f, W, H, 0xFF1A1A1A.toInt())
-        txt(c, hint, 130f, 1050f, 24f, Color.WHITE)
+        txt(c, hint, 130f, 1050f, 24f, fa(Color.WHITE, en))
         footer(c)
     }
 
+    private fun drawScreen(c: Canvas) {
+        grayBase(c, "Screen", "You can adjust various settings to match your setup.")
+        rect(c, 1319f, 107f, 1321f, 1004f, 0xFF999999.toInt())
+        // row separators
+        rowNames.forEachIndexed { i, _ ->
+            val k = kItem(i)
+            val top = 132f + i * 71f
+            val xo = -(1f - k) * 120f
+            rect(c, 130f + xo, top + 62f, 1312f + xo, top + 64f, fa(0xFFAAAAAA.toInt(), k))
+        }
+        // animated selection bar
+        run {
+            val k = kItem(sel)
+            val xo = -(1f - k) * 120f
+            val pulse = 0.5f + 0.5f * sin(nowMs / 260.0).toFloat()
+            rect(c, 130f + xo, selY, 1312f + xo, selY + 62f, fa(mix(YEL, 0xFFFFE680.toInt(), pulse * 0.45f), k))
+        }
+        rowNames.forEachIndexed { i, name ->
+            val k = kItem(i)
+            val top = 132f + i * 71f
+            val xo = -(1f - k) * 120f
+            val on = enabled(i)
+            val col = fa(if (on) Color.BLACK else GRAY_TXT, k)
+            txt(c, name, 150f + xo, top + 41f, 28f, col, i == sel)
+            if (i < 4) {
+                val nudge = if (i == sel) sin(nowMs / 170.0).toFloat() * 5f else 0f
+                tri(c, 861f + xo - nudge, top + 31f, -1, col)
+                txt(c, rowOpts[i][rv(i)], 1067f + xo, top + 41f, 28f, col, false, Paint.Align.CENTER)
+                tri(c, 1266f + xo + nudge, top + 31f, 1, col)
+            }
+        }
+        val dk = min(1f, raw * 1.4f)
+        para(c, rowDesc[sel], 1345f + (1f - dk) * 60f, 135f, 540, 28f, fa(Color.BLACK, dk))
+        para(c, "These options are saved by the launcher. Set the same values in PPSSPP's graphics settings to apply them.",
+            1345f + (1f - dk) * 60f, 420f, 540, 24f, fa(0xFF444444.toInt(), dk))
+    }
+
+    override fun onAttachedToWindow() { super.onAttachedToWindow(); invalidate() }
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) { super.onSizeChanged(w, h, ow, oh); invalidate() }
+
     override fun onDraw(c: Canvas) {
+        val now = SystemClock.uptimeMillis()
+        if (!started) { started = true; enterStart = now; lastT = now }
+        val dt = ((now - lastT) / 1000f).coerceIn(0f, 0.05f)
+        lastT = now; nowMs = now
+        raw = ((now - enterStart) / 600f).coerceIn(0f, 1f)
+        en = ease(raw)
+
+        val ty = if (s == S.SCREEN) 132f + sel * 71f else 522f + sel * 69.5f
+        if (snap) { selY = ty; snap = false } else selY += (ty - selY) * (1f - exp(-dt * 22f))
+
         c.drawColor(Color.BLACK)
         val sc = min(width / W, height / H)
         c.save()
@@ -259,21 +371,28 @@ class MenuView(private val act: MainActivity) : View(act) {
 
         when (s) {
             S.TITLE -> {
-                c.drawBitmap(bgTitle, null, RectF(0f, 0f, W, H), p)
-                val a = (150 + 105 * sin(System.currentTimeMillis() / 350.0)).toInt()
-                tp.alpha = 255
-                txt(c, "TOUCH SCREEN", W / 2, 1000f, 34f, Color.argb(a, 255, 255, 255), true, Paint.Align.CENTER)
+                val z = 1f + 0.05f * (0.5f + 0.5f * sin(now / 6000.0).toFloat())
+                c.save()
+                c.translate(W / 2, H / 2)
+                c.scale(z, z)
+                p.alpha = (255 * min(1f, en * 1.3f)).toInt()
+                c.drawBitmap(bgTitle, null, RectF(-W / 2, -H / 2, W / 2, H / 2), p)
+                p.alpha = 255
+                c.restore()
+                val a = (150 + 105 * sin(now / 350.0)).toInt()
+                txt(c, "TOUCH SCREEN", W / 2, 1010f + (1f - en) * 30f, 34f,
+                    Color.argb((a * en).toInt(), 255, 255, 255), true, Paint.Align.CENTER)
             }
             S.MAIN -> {
                 darkBase(c)
-                para(c, mainDesc, 1210f, 215f, 680, 26f, 0xFFC8C8C8.toInt())
+                para(c, mainDesc, 1210f + (1f - en) * 160f, 215f, 680, 26f, fa(0xFFC8C8C8.toInt(), en))
                 drawList(c, items(), null)
             }
             S.GAME -> {
                 darkBase(c)
                 val msg = if (act.hasDisc()) "Disc linked. Choose Start Mission to open PPSSPP."
                 else "No disc linked. Select your Peace Walker disc image to begin."
-                para(c, msg, 1210f, 215f, 680, 26f, 0xFFC8C8C8.toInt())
+                para(c, msg, 1210f + (1f - en) * 160f, 215f, 680, 26f, fa(0xFFC8C8C8.toInt(), en))
                 drawList(c, items(), "Game Selection")
             }
             S.OPTIONS -> { darkBase(c); drawList(c, items(), "Options") }
@@ -281,33 +400,16 @@ class MenuView(private val act: MainActivity) : View(act) {
             S.SCREEN -> drawScreen(c)
             S.INFO -> {
                 grayBase(c, infoTitle, "")
-                para(c, infoBody, 150f, 150f, 1600, 34f, Color.BLACK)
+                para(c, infoBody, 150f, 150f + (1f - en) * 40f, 1600, 34f, fa(Color.BLACK, en))
             }
         }
 
-        if (fade < 1f) rect(c, 0f, 0f, W, H, Color.argb(((1f - fade) * 255).toInt(), 0, 0, 0))
+        // subtle CRT scanlines
+        c.drawRect(0f, 0f, W, H, scan)
+        // quick fade-through-black on every screen change
+        val f = min(1f, raw * 2.5f)
+        if (f < 1f) rect(c, 0f, 0f, W, H, Color.argb(((1f - f) * 255).toInt(), 0, 0, 0))
         c.restore()
-        if (s == S.TITLE) postInvalidateOnAnimation()
-    }
-
-    private fun drawScreen(c: Canvas) {
-        grayBase(c, "Screen", "You can adjust various settings to match your setup.")
-        rowNames.forEachIndexed { i, name ->
-            val top = 132f + i * 71f
-            val on = enabled(i)
-            val col = if (on) Color.BLACK else GRAY_TXT
-            if (i == sel) rect(c, 130f, top, 1312f, top + 62f, YEL)
-            else rect(c, 130f, top + 62f, 1312f, top + 64f, 0xFFAAAAAA.toInt())
-            txt(c, name, 150f, top + 41f, 28f, col, i == sel)
-            if (i < 4) {
-                tri(c, 861f, top + 31f, -1, col)
-                txt(c, rowOpts[i][rv(i)], 1067f, top + 41f, 28f, col, false, Paint.Align.CENTER)
-                tri(c, 1266f, top + 31f, 1, col)
-            }
-        }
-        rect(c, 1319f, 107f, 1321f, 1004f, 0xFF999999.toInt())
-        para(c, rowDesc[sel], 1345f, 135f, 540, 28f, Color.BLACK)
-        para(c, "These options are saved by the launcher. Set the same values in PPSSPP's graphics settings to apply them.",
-            1345f, 420f, 540, 24f, 0xFF444444.toInt())
+        postInvalidateOnAnimation()
     }
 }
