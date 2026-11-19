@@ -1,0 +1,10 @@
+<resources>
+    <color name="pw_yellow">#FBCF00</color>
+    <color name="pw_black">#0A0A0A</color>
+    <style name="Theme.PW" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/pw_black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>
